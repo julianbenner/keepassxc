@@ -20,6 +20,7 @@
 #import <QWindow>
 #import <QMenu>
 #import <QMenuBar>
+#import <QDebug>
 #import <Cocoa/Cocoa.h>
 #if __clang_major__ >= 13 && MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_VERSION_12_3
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
@@ -255,6 +256,109 @@
 
 @end
 
+class MacWindowActivation final : public QObject
+{
+public:
+    explicit MacWindowActivation(QWindow* window)
+        : QObject(window)
+        , m_window(window)
+    {
+        connect(window, &QWindow::visibleChanged, this, [this](bool visible) {
+            if (!visible) {
+                finish();
+            }
+        });
+    }
+
+    ~MacWindowActivation() override
+    {
+        removeObserver();
+    }
+
+    void start(NSURL* bundleUrl)
+    {
+        const QPointer<MacWindowActivation> request(this);
+        m_observer = [[[NSNotificationCenter defaultCenter]
+            addObserverForName:NSApplicationDidBecomeActiveNotification
+                        object:NSApp
+                         queue:nil
+                    usingBlock:^(NSNotification*) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            if (request) {
+                                request->focusWindow();
+                            }
+                        });
+                    }] retain];
+
+        auto* configuration = [NSWorkspaceOpenConfiguration configuration];
+        configuration.activates = YES;
+        configuration.createsNewApplicationInstance = NO;
+        configuration.allowsRunningApplicationSubstitution = NO;
+        [[NSWorkspace sharedWorkspace]
+            openApplicationAtURL:bundleUrl
+                   configuration:configuration
+               completionHandler:^(NSRunningApplication* application, NSError* error) {
+                   // Opening can complete before native activation, and this callback runs off the main thread.
+                   dispatch_async(dispatch_get_main_queue(), ^{
+                       if (!request || !request->m_pending) {
+                           return;
+                       }
+                       if (error || application.processIdentifier != getpid()) {
+                           qWarning() << "Failed to activate the Auto-Type application:"
+                                      << (error ? error.localizedDescription.UTF8String : "another instance was opened");
+                           request->finish();
+                           return;
+                       }
+                       request->m_openCompleted = true;
+                       request->focusWindow();
+                   });
+               }];
+    }
+
+private:
+    void focusWindow()
+    {
+        if (!m_pending || !m_openCompleted) {
+            return;
+        }
+        if (!m_window || !m_window->isVisible()) {
+            finish();
+            return;
+        }
+        if (!NSApp.isActive) {
+            return;
+        }
+        auto* view = reinterpret_cast<NSView*>(m_window->winId());
+        [view.window makeFirstResponder:view];
+        [view.window makeKeyAndOrderFront:nil];
+        finish();
+    }
+
+    void removeObserver()
+    {
+        if (m_observer) {
+            [[NSNotificationCenter defaultCenter] removeObserver:m_observer];
+            [m_observer release];
+            m_observer = nil;
+        }
+    }
+
+    void finish()
+    {
+        if (!m_pending) {
+            return;
+        }
+        m_pending = false;
+        removeObserver();
+        deleteLater();
+    }
+
+    QPointer<QWindow> m_window;
+    id m_observer = nil;
+    bool m_pending = true;
+    bool m_openCompleted = false;
+};
+
 
 //
 // ------------------------- C++ Trampolines -------------------------
@@ -268,6 +372,7 @@ AppKit::AppKit(QObject* parent)
 
 AppKit::~AppKit()
 {
+    delete m_windowActivation.data();
     [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:static_cast<id>(self)];
     [[NSDistributedNotificationCenter defaultCenter] removeObserver:static_cast<id>(self)];
     [NSApp removeObserver:static_cast<id>(self) forKeyPath:@"effectiveAppearance"];
@@ -292,6 +397,29 @@ pid_t AppKit::ownProcessId()
 bool AppKit::activateProcess(pid_t pid)
 {
     return [static_cast<id>(self) activateProcess:pid];
+}
+
+void AppKit::activateWindow(QWindow* window)
+{
+    delete m_windowActivation.data();
+    if (!window || !window->isVisible()) {
+        return;
+    }
+    auto* application = [NSRunningApplication currentApplication];
+    const bool active = NSApp.isActive;
+    if (active || !application.bundleURL
+        || ![[[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundlePackageType"] isEqual:@"APPL"]) {
+        // Unbundled executables cannot reopen themselves through NSWorkspace.
+        if (!active) {
+            activateProcess(ownProcessId());
+        }
+        window->raise();
+        window->requestActivate();
+        return;
+    }
+    auto* request = new MacWindowActivation(window);
+    m_windowActivation = request;
+    request->start(application.bundleURL);
 }
 
 bool AppKit::hideProcess(pid_t pid)
