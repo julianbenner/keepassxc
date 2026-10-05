@@ -371,7 +371,9 @@ AppKit::AppKit(QObject* parent)
 
 AppKit::~AppKit()
 {
-    delete m_windowActivation;
+    if (m_windowActivation) {
+        delete m_windowActivation;
+    }
     [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:static_cast<id>(self)];
     [[NSDistributedNotificationCenter defaultCenter] removeObserver:static_cast<id>(self)];
     [NSApp removeObserver:static_cast<id>(self) forKeyPath:@"effectiveAppearance"];
@@ -400,7 +402,9 @@ bool AppKit::activateProcess(pid_t pid)
 
 void AppKit::activateWindow(QWindow* window)
 {
-    delete m_windowActivation;
+    if (m_windowActivation) {
+        delete m_windowActivation;
+    }
     if (!window || !window->isVisible()) {
         return;
     }
