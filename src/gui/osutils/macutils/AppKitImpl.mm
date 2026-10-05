@@ -20,7 +20,6 @@
 #import <QWindow>
 #import <QMenu>
 #import <QMenuBar>
-#import <QDebug>
 #import <Cocoa/Cocoa.h>
 #if __clang_major__ >= 13 && MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_VERSION_12_3
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
@@ -304,8 +303,8 @@ public:
                            return;
                        }
                        if (error || application.processIdentifier != getpid()) {
-                           qWarning() << "Failed to activate the Auto-Type application:"
-                                      << (error ? error.localizedDescription.UTF8String : "another instance was opened");
+                           qWarning("Failed to activate the Auto-Type application: %s",
+                                    error ? error.localizedDescription.UTF8String : "another instance was opened");
                            request->finish();
                            return;
                        }
@@ -372,7 +371,7 @@ AppKit::AppKit(QObject* parent)
 
 AppKit::~AppKit()
 {
-    delete m_windowActivation.data();
+    delete m_windowActivation;
     [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:static_cast<id>(self)];
     [[NSDistributedNotificationCenter defaultCenter] removeObserver:static_cast<id>(self)];
     [NSApp removeObserver:static_cast<id>(self) forKeyPath:@"effectiveAppearance"];
@@ -401,7 +400,7 @@ bool AppKit::activateProcess(pid_t pid)
 
 void AppKit::activateWindow(QWindow* window)
 {
-    delete m_windowActivation.data();
+    delete m_windowActivation;
     if (!window || !window->isVisible()) {
         return;
     }
